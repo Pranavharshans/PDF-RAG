@@ -18,8 +18,8 @@ A step-by-step guide to run the College Department PDF Chatbot from scratch.
 ## Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Pdf-rag.git
-cd Pdf-rag
+git clone https://github.com/Pranavharshans/PDF-RAG.git
+cd PDF-RAG
 ```
 
 ---
@@ -45,24 +45,26 @@ pip install -r requirements.txt
 
 ## Step 4: Create Pinecone Index
 
+> ⚠️ **IMPORTANT:** This app uses **Hybrid Search** which requires specific settings!
+
 1. Go to [Pinecone Console](https://app.pinecone.io/)
 2. Sign up or log in
 3. Click **"Create Index"**
-4. Configure the index with these **exact settings**:
+4. Configure the index with these **EXACT settings**:
 
-| Setting | Value |
-|---------|-------|
-| **Index Name** | `college-pdf-rag` (or any name you prefer) |
-| **Dimensions** | `1536` |
-| **Metric** | `cosine` |
-| **Index Type** | `Serverless` |
-| **Cloud Provider** | AWS (or your preference) |
-| **Region** | `us-east-1` (or your preference) |
+| Setting | Value | Why? |
+|---------|-------|------|
+| **Index Name** | `college-pdf-rag` (or any name) | Must match `.env` |
+| **Dimensions** | `1536` | Matches OpenAI embedding model |
+| **Metric** | ⚠️ **`dotproduct`** | **REQUIRED for hybrid search** |
+| **Index Type** | `Serverless` | Recommended |
+| **Cloud Provider** | AWS | Or your preference |
+| **Region** | `us-east-1` | Or your preference |
 
 5. Click **"Create Index"**
 6. Wait for the index status to become **"Ready"**
 
-> **Important:** The dimensions MUST be `1536` to match the OpenAI embedding model.
+> ⚠️ **Critical:** The metric MUST be `dotproduct` (not `cosine`). Hybrid search with sparse vectors requires dotproduct metric!
 
 ---
 
@@ -135,8 +137,22 @@ streamlit run app.py
 The app will:
 1. Open in your browser at `http://localhost:8501`
 2. Check if the Pinecone index is empty
-3. **First run only:** Automatically index all PDFs (takes 1-2 minutes)
-4. Display the chat interface
+3. **First run only:** Automatically index all PDFs with hybrid search (takes 1-2 minutes)
+4. Display the chat interface with streaming responses
+
+---
+
+## Features
+
+### Hybrid Search
+The app combines two search methods for better results:
+- **Semantic Search**: Understands meaning and context
+- **Keyword Search (BM25)**: Matches exact terms and names
+
+This means queries like "Dr. Anandakumar" or "CSE PAC 2024" will find exact matches!
+
+### Streaming Responses
+Answers appear word-by-word as they're generated, providing a faster, more responsive experience.
 
 ---
 
@@ -145,8 +161,8 @@ The app will:
 1. Type your question in the chat input
 2. Press Enter or click Send
 3. The chatbot will:
-   - Search the indexed PDFs for relevant information
-   - Generate an answer using only the PDF content
+   - Search using hybrid search (semantic + keyword)
+   - Stream the answer in real-time
    - Show sources (PDF name + page number) for every answer
 
 ---
@@ -165,6 +181,10 @@ The app will:
 ### "Dimension mismatch" error
 - Delete and recreate your Pinecone index with **1536 dimensions**
 
+### "Invalid sparse vector" or hybrid search errors
+- Make sure your Pinecone index uses **`dotproduct`** metric (not `cosine`)
+- Delete and recreate the index with the correct metric
+
 ### Empty answers or "couldn't find information"
 - Ensure PDFs are in `data/pdfs/` folder
 - Check that PDFs contain extractable text (not scanned images)
@@ -176,17 +196,25 @@ If you add new PDFs and want to re-index:
 python indexer.py --force
 ```
 
+### Migrating from old index (cosine metric)
+If you previously created an index with `cosine` metric:
+1. Delete the old index in Pinecone Console
+2. Create a new index with `dotproduct` metric
+3. Run `python indexer.py --force` to re-index
+
 ---
 
 ## Project Structure
 
 ```
-Pdf-rag/
+PDF-RAG/
 ├── app.py                 # Main Streamlit application
-├── indexer.py             # PDF indexing logic
+├── indexer.py             # PDF indexing logic (hybrid)
 ├── data/
-│   └── pdfs/              # Your PDF files go here
+│   ├── pdfs/              # Your PDF files go here
+│   └── bm25_model.json    # Fitted BM25 model (auto-generated)
 ├── utils/
+│   ├── bm25_encoder.py    # BM25 sparse encoder for hybrid search
 │   ├── chunking.py        # Text splitting
 │   ├── embeddings.py      # OpenRouter embeddings
 │   ├── pdf_loader.py      # PDF text extraction
@@ -211,9 +239,34 @@ Pdf-rag/
 
 ---
 
+## Technical Details
+
+### Search Architecture
+```
+User Query
+    ↓
+┌───────────────────────────────────────┐
+│  Dense Embedding (OpenRouter)         │ → Semantic understanding
+│  Sparse Embedding (BM25)              │ → Keyword matching
+└───────────────────────────────────────┘
+    ↓
+Pinecone Hybrid Query (dotproduct fusion)
+    ↓
+Top 6 most relevant chunks
+    ↓
+Groq LLM (streaming response)
+    ↓
+Answer + Sources
+```
+
+### Why dotproduct metric?
+Pinecone's hybrid search combines dense and sparse vectors using the dotproduct metric. Cosine similarity doesn't support sparse vectors properly, which is why `dotproduct` is required.
+
+---
+
 ## Support
 
 If you encounter issues:
 1. Check the Troubleshooting section above
 2. Ensure all API keys are valid and have sufficient credits
-3. Verify Pinecone index settings match the requirements
+3. Verify Pinecone index settings match the requirements (especially `dotproduct` metric!)

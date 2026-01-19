@@ -1,6 +1,6 @@
 """
 Indexer Module
-Handles automatic one-time indexing of PDF documents into Pinecone.
+Handles automatic one-time indexing of PDF documents into Pinecone with hybrid search.
 """
 
 import os
@@ -11,9 +11,10 @@ from dotenv import load_dotenv
 from utils.pdf_loader import load_all_pdfs, get_total_pages
 from utils.chunking import chunk_documents
 from utils.embeddings import generate_chunk_embeddings, get_embedding_client
+from utils.bm25_encoder import fit_bm25_encoder, encode_documents_batch
 from utils.pinecone_utils import (
     is_index_empty,
-    upsert_chunks,
+    upsert_chunks_hybrid,
     get_index_stats,
     get_pinecone_client,
 )
@@ -25,7 +26,7 @@ DEFAULT_PDF_DIR = Path(__file__).parent / "data" / "pdfs"
 
 def run_indexing(pdf_directory: str | Path | None = None, force: bool = False) -> bool:
     """
-    Run the indexing pipeline to load PDFs into Pinecone.
+    Run the indexing pipeline to load PDFs into Pinecone with hybrid search.
     
     This function checks if the index is empty before indexing.
     If the index already contains vectors, indexing is skipped unless force=True.
@@ -47,16 +48,16 @@ def run_indexing(pdf_directory: str | Path | None = None, force: bool = False) -
     pdf_directory = Path(pdf_directory)
     
     print("=" * 50)
-    print("PDF RAG Indexer")
+    print("PDF RAG Indexer (Hybrid Search)")
     print("=" * 50)
     
     # Initialize clients
-    print("\n[1/6] Initializing clients...")
+    print("\n[1/7] Initializing clients...")
     pinecone_client = get_pinecone_client()
     embedding_client = get_embedding_client()
     
     # Check if index already has vectors
-    print("\n[2/6] Checking Pinecone index status...")
+    print("\n[2/7] Checking Pinecone index status...")
     if not force and not is_index_empty(pinecone_client):
         stats = get_index_stats(pinecone_client)
         vector_count = stats.get("total_vector_count", 0)
@@ -65,7 +66,7 @@ def run_indexing(pdf_directory: str | Path | None = None, force: bool = False) -
         return False
     
     # Load PDFs
-    print(f"\n[3/6] Loading PDFs from {pdf_directory}...")
+    print(f"\n[3/7] Loading PDFs from {pdf_directory}...")
     documents = load_all_pdfs(pdf_directory)
     
     if not documents:
@@ -76,24 +77,39 @@ def run_indexing(pdf_directory: str | Path | None = None, force: bool = False) -
     print(f"Loaded {len(documents)} documents with {total_pages} total pages.")
     
     # Chunk documents
-    print("\n[4/6] Chunking documents...")
+    print("\n[4/7] Chunking documents...")
     chunks = chunk_documents(documents)
     
     if not chunks:
         print("No chunks generated from documents.")
         return False
     
-    # Generate embeddings
-    print("\n[5/6] Generating embeddings...")
+    # Fit BM25 encoder on all chunk texts
+    print("\n[5/7] Fitting BM25 encoder for hybrid search...")
+    all_texts = [chunk.text for chunk in chunks]
+    fit_bm25_encoder(all_texts)
+    
+    # Generate sparse embeddings (BM25)
+    print("\n[6/7] Generating embeddings...")
+    print("  - Generating sparse embeddings (BM25)...")
+    sparse_embeddings = encode_documents_batch(all_texts)
+    
+    # Generate dense embeddings (semantic)
+    print("  - Generating dense embeddings (semantic)...")
     chunk_embedding_pairs = generate_chunk_embeddings(chunks, embedding_client)
     
     # Separate chunks and embeddings for upsert
     indexed_chunks = [pair[0] for pair in chunk_embedding_pairs]
-    embeddings = [pair[1] for pair in chunk_embedding_pairs]
+    dense_embeddings = [pair[1] for pair in chunk_embedding_pairs]
     
-    # Upsert to Pinecone
-    print("\n[6/6] Upserting to Pinecone...")
-    upserted_count = upsert_chunks(indexed_chunks, embeddings, pinecone_client)
+    # Upsert to Pinecone with hybrid vectors
+    print("\n[7/7] Upserting to Pinecone (hybrid vectors)...")
+    upserted_count = upsert_chunks_hybrid(
+        indexed_chunks, 
+        dense_embeddings, 
+        sparse_embeddings, 
+        pinecone_client
+    )
     
     print("\n" + "=" * 50)
     print("Indexing Complete!")
@@ -102,6 +118,7 @@ def run_indexing(pdf_directory: str | Path | None = None, force: bool = False) -
     print(f"Total pages: {total_pages}")
     print(f"Chunks created: {len(chunks)}")
     print(f"Vectors upserted: {upserted_count}")
+    print(f"Search type: Hybrid (semantic + keyword)")
     
     return True
 

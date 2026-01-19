@@ -1,10 +1,12 @@
 """
 College Department PDF Chatbot - Streamlit Application
 A RAG chatbot that answers questions strictly from indexed PDF documents.
+Features: Hybrid search (semantic + keyword) and streaming responses.
 """
 
 import os
 from dataclasses import dataclass
+from typing import Generator
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -12,7 +14,8 @@ from groq import Groq
 
 from indexer import ensure_indexed, check_index_status
 from utils.embeddings import generate_query_embedding
-from utils.pinecone_utils import query_similar_chunks, RetrievedChunk
+from utils.bm25_encoder import encode_query
+from utils.pinecone_utils import query_similar_chunks_hybrid, RetrievedChunk
 
 
 # Load environment variables
@@ -94,13 +97,13 @@ def format_sources_display(sources: list[Source]) -> str:
     return "\n".join(source_lines)
 
 
-def generate_answer(
+def generate_answer_streaming(
     question: str,
     context: str,
     chat_history: list[dict],
     groq_client: Groq
-) -> str:
-    """Generate an answer using Groq LLM."""
+) -> Generator[str, None, None]:
+    """Generate an answer using Groq LLM with streaming."""
     # Build messages with chat history
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
@@ -120,15 +123,18 @@ Please answer the question using ONLY the information from the context above. In
 
     messages.append({"role": "user", "content": user_message})
     
-    # Generate response
-    response = groq_client.chat.completions.create(
+    # Generate streaming response
+    stream = groq_client.chat.completions.create(
         model=GROQ_MODEL,
         messages=messages,
         temperature=0.1,
         max_tokens=1024,
+        stream=True,
     )
     
-    return response.choices[0].message.content
+    for chunk in stream:
+        if chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 
 def check_retrieval_quality(chunks: list[RetrievedChunk]) -> bool:
@@ -141,41 +147,30 @@ def check_retrieval_quality(chunks: list[RetrievedChunk]) -> bool:
     return best_score >= SIMILARITY_THRESHOLD
 
 
-def handle_query(question: str) -> tuple[str, list[Source]]:
+def retrieve_chunks(question: str) -> list[RetrievedChunk]:
     """
-    Process a user query through the RAG pipeline.
+    Retrieve relevant chunks using hybrid search.
     
+    Args:
+        question: User's question
+        
     Returns:
-        Tuple of (answer, sources)
+        List of retrieved chunks
     """
-    # Generate query embedding
-    query_embedding = generate_query_embedding(question)
+    # Generate dense embedding (semantic)
+    dense_embedding = generate_query_embedding(question)
     
-    # Retrieve similar chunks
-    chunks = query_similar_chunks(query_embedding, top_k=TOP_K_RESULTS)
+    # Generate sparse embedding (BM25 keyword)
+    sparse_embedding = encode_query(question)
     
-    # Check retrieval quality
-    if not check_retrieval_quality(chunks):
-        return (
-            "I couldn't find relevant information in the provided documents to answer your question. "
-            "Please try rephrasing your question or ask about a different topic covered in the documents.",
-            []
-        )
-    
-    # Format context and extract sources
-    context = format_context(chunks)
-    sources = extract_sources(chunks)
-    
-    # Generate answer
-    groq_client = get_groq_client()
-    answer = generate_answer(
-        question=question,
-        context=context,
-        chat_history=st.session_state.get("messages", []),
-        groq_client=groq_client
+    # Hybrid search
+    chunks = query_similar_chunks_hybrid(
+        query_dense_embedding=dense_embedding,
+        query_sparse_embedding=sparse_embedding,
+        top_k=TOP_K_RESULTS
     )
     
-    return answer, sources
+    return chunks
 
 
 def initialize_session_state():
@@ -245,12 +240,19 @@ def main():
         
         st.divider()
         
+        st.header("🔍 Search Mode")
+        st.markdown("**Hybrid Search** enabled")
+        st.caption("Combines semantic understanding with keyword matching for better results.")
+        
+        st.divider()
+        
         st.header("ℹ️ About")
         st.markdown("""
         This chatbot answers questions **only** from indexed PDF documents.
         
         **Features:**
-        - Strict source-based answers
+        - Hybrid search (semantic + keyword)
+        - Streaming responses
         - Source citations with page numbers
         - No hallucinations
         
@@ -288,34 +290,66 @@ def main():
         
         # Generate response
         with st.chat_message("assistant"):
-            with st.spinner("Searching documents and generating answer..."):
-                try:
-                    answer, sources = handle_query(prompt)
+            try:
+                # Retrieve relevant chunks (with spinner)
+                with st.spinner("Searching documents..."):
+                    chunks = retrieve_chunks(prompt)
+                
+                # Check retrieval quality
+                if not check_retrieval_quality(chunks):
+                    fallback_msg = (
+                        "I couldn't find relevant information in the provided documents to answer your question. "
+                        "Please try rephrasing your question or ask about a different topic covered in the documents."
+                    )
+                    st.markdown(fallback_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": fallback_msg,
+                        "sources": ""
+                    })
+                else:
+                    # Format context and extract sources
+                    context = format_context(chunks)
+                    sources = extract_sources(chunks)
+                    sources_display = format_sources_display(sources)
                     
-                    # Display answer
-                    st.markdown(answer)
+                    # Stream the answer
+                    groq_client = get_groq_client()
+                    response_placeholder = st.empty()
+                    full_response = ""
+                    
+                    for token in generate_answer_streaming(
+                        question=prompt,
+                        context=context,
+                        chat_history=st.session_state.messages[:-1],  # Exclude current user message
+                        groq_client=groq_client
+                    ):
+                        full_response += token
+                        response_placeholder.markdown(full_response + "▌")
+                    
+                    # Final response without cursor
+                    response_placeholder.markdown(full_response)
                     
                     # Display sources
                     if sources:
-                        sources_display = format_sources_display(sources)
                         with st.expander("📚 Sources"):
                             st.markdown(sources_display)
                     
                     # Add to history
                     st.session_state.messages.append({
                         "role": "assistant",
-                        "content": answer,
-                        "sources": sources_display if sources else ""
+                        "content": full_response,
+                        "sources": sources_display
                     })
                     
-                except Exception as e:
-                    error_msg = f"An error occurred: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": error_msg,
-                        "sources": ""
-                    })
+            except Exception as e:
+                error_msg = f"An error occurred: {str(e)}"
+                st.error(error_msg)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": error_msg,
+                    "sources": ""
+                })
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """
 Pinecone Utils Module
-Handles all Pinecone vector database operations.
+Handles all Pinecone vector database operations with hybrid search support.
 """
 
 import os
@@ -106,6 +106,101 @@ def get_index_stats(client: Pinecone | None = None) -> dict:
     return index.describe_index_stats()
 
 
+def upsert_chunks_hybrid(
+    chunks: list[TextChunk],
+    dense_embeddings: list[list[float]],
+    sparse_embeddings: list[dict],
+    client: Pinecone | None = None,
+    show_progress: bool = True
+) -> int:
+    """
+    Upsert chunks with both dense and sparse vectors to Pinecone.
+    
+    Args:
+        chunks: List of TextChunk objects
+        dense_embeddings: List of dense embedding vectors (semantic)
+        sparse_embeddings: List of sparse embedding dicts (BM25)
+        client: Optional pre-initialized Pinecone client
+        show_progress: Whether to print progress updates
+        
+    Returns:
+        Number of vectors upserted
+    """
+    if len(chunks) != len(dense_embeddings) or len(chunks) != len(sparse_embeddings):
+        raise ValueError("Number of chunks must match number of embeddings")
+    
+    index = get_index(client)
+    
+    # Prepare vectors for upsert with both dense and sparse
+    vectors = []
+    for chunk, dense_emb, sparse_emb in zip(chunks, dense_embeddings, sparse_embeddings):
+        vectors.append({
+            "id": chunk.id,
+            "values": dense_emb,
+            "sparse_values": sparse_emb,
+            "metadata": {
+                "text": chunk.text,
+                "source_pdf": chunk.source_pdf,
+                "page": chunk.page,
+            }
+        })
+    
+    # Upsert in batches
+    total_upserted = 0
+    for i in range(0, len(vectors), UPSERT_BATCH_SIZE):
+        batch = vectors[i:i + UPSERT_BATCH_SIZE]
+        index.upsert(vectors=batch)
+        total_upserted += len(batch)
+        
+        if show_progress:
+            print(f"Upserted: {total_upserted}/{len(vectors)} vectors")
+    
+    return total_upserted
+
+
+def query_similar_chunks_hybrid(
+    query_dense_embedding: list[float],
+    query_sparse_embedding: dict,
+    top_k: int = 6,
+    client: Pinecone | None = None
+) -> list[RetrievedChunk]:
+    """
+    Query Pinecone with hybrid search (dense + sparse vectors).
+    
+    Args:
+        query_dense_embedding: Dense embedding vector for the query
+        query_sparse_embedding: Sparse embedding dict for the query (BM25)
+        top_k: Number of results to return
+        client: Optional pre-initialized Pinecone client
+        
+    Returns:
+        List of RetrievedChunk objects sorted by similarity
+    """
+    index = get_index(client)
+    
+    results = index.query(
+        vector=query_dense_embedding,
+        sparse_vector=query_sparse_embedding,
+        top_k=top_k,
+        include_metadata=True
+    )
+    
+    retrieved_chunks: list[RetrievedChunk] = []
+    
+    for match in results.get("matches", []):
+        metadata = match.get("metadata", {})
+        retrieved_chunks.append(RetrievedChunk(
+            id=match["id"],
+            text=metadata.get("text", ""),
+            source_pdf=metadata.get("source_pdf", "unknown"),
+            page=metadata.get("page", 0),
+            score=match.get("score", 0.0)
+        ))
+    
+    return retrieved_chunks
+
+
+# Keep old function for backwards compatibility
 def upsert_chunks(
     chunks: list[TextChunk],
     embeddings: list[list[float]],
@@ -113,7 +208,7 @@ def upsert_chunks(
     show_progress: bool = True
 ) -> int:
     """
-    Upsert chunks with their embeddings to Pinecone.
+    Upsert chunks with their embeddings to Pinecone (dense only - legacy).
     
     Args:
         chunks: List of TextChunk objects
@@ -155,13 +250,14 @@ def upsert_chunks(
     return total_upserted
 
 
+# Keep old function for backwards compatibility
 def query_similar_chunks(
     query_embedding: list[float],
     top_k: int = 6,
     client: Pinecone | None = None
 ) -> list[RetrievedChunk]:
     """
-    Query Pinecone for similar chunks.
+    Query Pinecone for similar chunks (dense only - legacy).
     
     Args:
         query_embedding: Embedding vector for the query

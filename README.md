@@ -4,6 +4,8 @@ A Streamlit-based RAG chatbot that answers questions strictly from a fixed set o
 
 ## Features
 
+- **Hybrid Search**: Combines semantic understanding with keyword matching for better retrieval
+- **Streaming Responses**: See answers appear in real-time
 - **PDF-only answers**: Responses are generated exclusively from your uploaded PDFs
 - **Source citations**: Every answer includes PDF filename and page number
 - **Auto-indexing**: PDFs are automatically indexed on first run
@@ -16,27 +18,30 @@ A Streamlit-based RAG chatbot that answers questions strictly from a fixed set o
 |-----------|------------|
 | Frontend | Streamlit |
 | Embeddings | OpenRouter (text-embedding-3-small) |
+| Keyword Search | BM25 (pinecone-text) |
 | Vector DB | Pinecone (hosted) |
 | LLM | Groq API |
-| PDF Extraction | PyPDF2 |
+| PDF Extraction | pdfplumber |
 
-## Setup
+## Quick Start
 
-### 1. Install Dependencies
+### 1. Clone and Install
 
 ```bash
+git clone https://github.com/Pranavharshans/PDF-RAG.git
+cd PDF-RAG
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ### 2. Configure Environment Variables
 
-Copy the example environment file and fill in your API keys:
-
 ```bash
 cp .env.example .env
 ```
 
-Required keys:
+Edit `.env` with your API keys:
 - `OPENROUTER_API_KEY` - Get from [OpenRouter](https://openrouter.ai/)
 - `GROQ_API_KEY` - Get from [Groq Console](https://console.groq.com/)
 - `PINECONE_API_KEY` - Get from [Pinecone Console](https://app.pinecone.io/)
@@ -44,9 +49,14 @@ Required keys:
 
 ### 3. Create Pinecone Index
 
-Create a serverless index in Pinecone with:
-- **Dimensions**: 1536
-- **Metric**: cosine
+Create a serverless index in Pinecone with these **exact settings**:
+
+| Setting | Value |
+|---------|-------|
+| **Dimensions** | `1536` |
+| **Metric** | ⚠️ `dotproduct` (required for hybrid search) |
+
+> **Important**: Must use `dotproduct` metric, not `cosine`!
 
 ### 4. Add Your PDFs
 
@@ -58,24 +68,27 @@ Place your PDF files in the `data/pdfs/` directory.
 streamlit run app.py
 ```
 
-The application will automatically index your PDFs on first run if the Pinecone index is empty.
+The application will automatically index your PDFs on first run.
 
 ## Project Structure
 
 ```
-project/
+PDF-RAG/
 ├── app.py                    # Main Streamlit application
-├── indexer.py                # One-time automatic indexing logic
+├── indexer.py                # Automatic indexing logic (hybrid)
 ├── data/
-│   └── pdfs/                 # Place PDF files here
+│   ├── pdfs/                 # Place PDF files here
+│   └── bm25_model.json       # Fitted BM25 model (auto-generated)
 ├── utils/
 │   ├── __init__.py
+│   ├── bm25_encoder.py       # BM25 sparse encoder
 │   ├── chunking.py           # Text splitting logic
 │   ├── embeddings.py         # OpenRouter embedding calls
-│   ├── pinecone_utils.py     # Pinecone operations
+│   ├── pinecone_utils.py     # Pinecone operations (hybrid)
 │   └── pdf_loader.py         # PDF text extraction
 ├── requirements.txt
 ├── .env.example
+├── GUIDE.md                  # Detailed setup guide
 └── README.md
 ```
 
@@ -84,10 +97,9 @@ project/
 1. Open the Streamlit app in your browser
 2. Type your question about the college department
 3. The system will:
-   - Embed your question
-   - Search for relevant content in the PDFs
-   - Generate an answer using only the retrieved content
-   - Display the answer with source citations
+   - Search using hybrid search (semantic + keyword)
+   - Stream the answer in real-time
+   - Display source citations (PDF name + page number)
 
 ## Safety Features
 
@@ -95,6 +107,10 @@ project/
 - If information is not found, the system responds with a fallback message
 - All answers include source citations (PDF name + page number)
 - No external knowledge or speculation is used
+
+## Documentation
+
+See [GUIDE.md](GUIDE.md) for detailed setup instructions and troubleshooting.
 
 ## License
 
